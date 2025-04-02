@@ -19,12 +19,6 @@ const PANCAKE_ROUTER_V2 = formatAddress("0x10ED43C718714eb63d5aA57B78B54704E2560
 // Không dùng Quoter vì yêu cầu transaction
 const PANCAKE_V3_FACTORY = formatAddress("0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865");
 
-// Known V3 pools
-const KNOWN_V3_POOLS = {
-  // UGO/BNB Pool
-//   "UGO-BNB": formatAddress("0x54D967D7B7260C1ef74A4D8b7B9A1db04a3F5DBa")
-};
-
 // Tokens
 const WBNB = formatAddress("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c");
 const USDT = formatAddress("0x55d398326f99059fF775485246999027B3197955"); // BSC USDT (USDT-BSC)
@@ -117,26 +111,6 @@ function priceFromTick(tick, invert = false) {
 }
 
 /**
- * Kiểm tra xem có pool V3 được biết đến cho cặp token này không
- * @param {string} tokenA - Địa chỉ token A
- * @param {string} tokenB - Địa chỉ token B
- * @returns {string|null} - Địa chỉ pool hoặc null nếu không tìm thấy
- */
-function getKnownPoolAddress(tokenA, tokenB) {
-  const formattedTokenA = formatAddress(tokenA);
-  const formattedTokenB = formatAddress(tokenB);
-  
-  // Kiểm tra UGO-BNB pool
-  if ((formattedTokenA === UGO && formattedTokenB === WBNB) || 
-      (formattedTokenA === WBNB && formattedTokenB === UGO)) {
-    console.log("Tìm thấy pool đã biết: UGO-BNB!");
-    return KNOWN_V3_POOLS["UGO-BNB"];
-  }
-  
-  return null;
-}
-
-/**
  * Thử lấy giá token trên PancakeSwap V3 sử dụng pool trực tiếp
  * @param {string} tokenIn - Địa chỉ token input
  * @param {string} tokenOut - Địa chỉ token output
@@ -150,34 +124,6 @@ async function tryGetPriceV3(tokenIn, tokenOut) {
     // Format các addresses
     const formattedTokenIn = formatAddress(tokenIn);
     const formattedTokenOut = formatAddress(tokenOut);
-    
-    // Kiểm tra xem có pool đã biết cho cặp token này không
-    const knownPoolAddress = getKnownPoolAddress(formattedTokenIn, formattedTokenOut);
-    if (knownPoolAddress) {
-      try {
-        // Khởi tạo contract cho pool
-        const poolContract = new ethers.Contract(knownPoolAddress, POOL_V3_ABI, provider);
-        
-        // Lấy thông tin token0 và token1 để xác định thứ tự
-        const [token0, token1, slot0Data] = await Promise.all([
-          poolContract.token0(),
-          poolContract.token1(),
-          poolContract.slot0()
-        ]);
-        
-        // Xác định xem có cần đảo ngược giá không dựa vào thứ tự token
-        const invert = formattedTokenIn === token1;
-        
-        // Lấy giá từ tick trong slot0
-        const { tick } = slot0Data;
-        const price = priceFromTick(tick, invert);
-        
-        console.log(`Tìm thấy giá từ pool đã biết: ${price}`);
-        return price.toString();
-      } catch (error) {
-        console.error("Lỗi khi lấy giá từ pool đã biết:", error.message);
-      }
-    }
     
     // Thử các fee tiers
     for (const fee of feeTiers) {
