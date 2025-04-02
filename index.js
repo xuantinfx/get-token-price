@@ -16,21 +16,37 @@ function formatAddress(address) {
 const PANCAKE_ROUTER_V2 = formatAddress("0x10ED43C718714eb63d5aA57B78B54704E256024E");
 
 // PancakeSwap V3
-const PANCAKE_QUOTER_V3 = formatAddress("0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997");
+// Không dùng Quoter vì yêu cầu transaction
+const PANCAKE_V3_FACTORY = formatAddress("0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865");
+
+// Known V3 pools
+const KNOWN_V3_POOLS = {
+  // UGO/BNB Pool
+//   "UGO-BNB": formatAddress("0x54D967D7B7260C1ef74A4D8b7B9A1db04a3F5DBa")
+};
 
 // Tokens
 const WBNB = formatAddress("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c");
 const USDT = formatAddress("0x55d398326f99059fF775485246999027B3197955"); // BSC USDT (USDT-BSC)
 const BUSD = formatAddress("0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56"); // BUSD-BSC
 const USDC = formatAddress("0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d"); // USDC-BSC
+const UGO = formatAddress("0x66a2ed2F04BC7D2a03785DD04261A2FA595a5839"); // UGO Token
 
 // ABIs
 const ROUTER_ABI = [
   "function getAmountsOut(uint amountIn, address[] memory path) external view returns (uint[] memory amounts)"
 ];
 
-const QUOTER_ABI = [
-  "function quoteExactInputSingle(address tokenIn, address tokenOut, uint24 fee, uint256 amountIn, uint160 sqrtPriceLimitX96) external returns (uint256 amountOut)"
+// ABI cho PancakeSwap V3 Factory
+const FACTORY_V3_ABI = [
+  "function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address pool)"
+];
+
+// ABI cho PancakeSwap V3 Pool
+const POOL_V3_ABI = [
+  "function slot0() external view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)",
+  "function token0() external view returns (address)",
+  "function token1() external view returns (address)"
 ];
 
 const ERC20_ABI = [
@@ -40,7 +56,7 @@ const ERC20_ABI = [
 ];
 
 const routerContract = new ethers.Contract(PANCAKE_ROUTER_V2, ROUTER_ABI, provider);
-const quoterContract = new ethers.Contract(PANCAKE_QUOTER_V3, QUOTER_ABI, provider);
+const factoryV3Contract = new ethers.Contract(PANCAKE_V3_FACTORY, FACTORY_V3_ABI, provider);
 
 /**
  * Gọi API để lấy dữ liệu
@@ -89,6 +105,127 @@ function fetchAPI(url) {
 }
 
 /**
+ * Tính giá từ tick (PancakeSwap V3)
+ * @param {number} tick - Tick từ pool V3
+ * @param {boolean} invert - Đảo ngược giá hay không
+ * @returns {number} - Giá tính ra
+ */
+function priceFromTick(tick, invert = false) {
+  // Formula: price = 1.0001^tick
+  let price = Math.pow(1.0001, Number(tick));
+  return invert ? 1 / price : price;
+}
+
+/**
+ * Kiểm tra xem có pool V3 được biết đến cho cặp token này không
+ * @param {string} tokenA - Địa chỉ token A
+ * @param {string} tokenB - Địa chỉ token B
+ * @returns {string|null} - Địa chỉ pool hoặc null nếu không tìm thấy
+ */
+function getKnownPoolAddress(tokenA, tokenB) {
+  const formattedTokenA = formatAddress(tokenA);
+  const formattedTokenB = formatAddress(tokenB);
+  
+  // Kiểm tra UGO-BNB pool
+  if ((formattedTokenA === UGO && formattedTokenB === WBNB) || 
+      (formattedTokenA === WBNB && formattedTokenB === UGO)) {
+    console.log("Tìm thấy pool đã biết: UGO-BNB!");
+    return KNOWN_V3_POOLS["UGO-BNB"];
+  }
+  
+  return null;
+}
+
+/**
+ * Thử lấy giá token trên PancakeSwap V3 sử dụng pool trực tiếp
+ * @param {string} tokenIn - Địa chỉ token input
+ * @param {string} tokenOut - Địa chỉ token output
+ * @returns {Promise<string|null>} - Giá token hoặc null nếu không thành công
+ */
+async function tryGetPriceV3(tokenIn, tokenOut) {
+  // Các fee tiers của PancakeSwap V3 (0.01%, 0.05%, 0.25%, 1%)
+  const feeTiers = [100, 500, 2500, 10000];
+  
+  try {
+    // Format các addresses
+    const formattedTokenIn = formatAddress(tokenIn);
+    const formattedTokenOut = formatAddress(tokenOut);
+    
+    // Kiểm tra xem có pool đã biết cho cặp token này không
+    const knownPoolAddress = getKnownPoolAddress(formattedTokenIn, formattedTokenOut);
+    if (knownPoolAddress) {
+      try {
+        // Khởi tạo contract cho pool
+        const poolContract = new ethers.Contract(knownPoolAddress, POOL_V3_ABI, provider);
+        
+        // Lấy thông tin token0 và token1 để xác định thứ tự
+        const [token0, token1, slot0Data] = await Promise.all([
+          poolContract.token0(),
+          poolContract.token1(),
+          poolContract.slot0()
+        ]);
+        
+        // Xác định xem có cần đảo ngược giá không dựa vào thứ tự token
+        const invert = formattedTokenIn === token1;
+        
+        // Lấy giá từ tick trong slot0
+        const { tick } = slot0Data;
+        const price = priceFromTick(tick, invert);
+        
+        console.log(`Tìm thấy giá từ pool đã biết: ${price}`);
+        return price.toString();
+      } catch (error) {
+        console.error("Lỗi khi lấy giá từ pool đã biết:", error.message);
+      }
+    }
+    
+    // Thử các fee tiers
+    for (const fee of feeTiers) {
+      try {
+        // Lấy địa chỉ pool cho cặp token và fee này
+        const poolAddress = await factoryV3Contract.getPool(formattedTokenIn, formattedTokenOut, fee);
+        
+        // Nếu không có pool, thử fee tiếp theo
+        if (poolAddress === ethers.ZeroAddress) {
+          continue;
+        }
+        
+        // Khởi tạo contract cho pool
+        const poolContract = new ethers.Contract(formatAddress(poolAddress), POOL_V3_ABI, provider);
+        
+        // Lấy thông tin token0 và token1 để xác định thứ tự
+        const [token0, token1, slot0Data] = await Promise.all([
+          poolContract.token0(),
+          poolContract.token1(),
+          poolContract.slot0()
+        ]);
+        
+        // Xác định xem có cần đảo ngược giá không dựa vào thứ tự token
+        const invert = formattedTokenIn === token1;
+        
+        // Lấy giá từ tick trong slot0
+        const { tick } = slot0Data;
+        const price = priceFromTick(tick, invert);
+        
+        console.log(`Tìm thấy pool V3 với fee ${fee/10000}% cho cặp token này!`);
+        return price.toString();
+        
+      } catch (error) {
+        console.log(error);
+        // Ghi log nhưng không dừng lại, tiếp tục thử fee tier khác
+        console.log(`Không tìm thấy pool V3 với fee ${fee/10000}% cho cặp token này.`);
+      }
+    }
+    
+    // Nếu không tìm thấy pool nào
+    return null;
+  } catch (error) {
+    console.error("Lỗi khi lấy giá từ PancakeSwap V3:", error.message);
+    return null;
+  }
+}
+
+/**
  * Lấy giá token từ Binance API
  * @param {string} tokenAddress - Địa chỉ token cần lấy giá
  * @param {string} symbol - Symbol của token
@@ -112,10 +249,9 @@ async function getPriceDexScreener(tokenAddress, symbol, mode) {
       
       // Lấy cặp có thanh khoản cao nhất
       const bestPair = sortedPairs[0];
-      
       if (mode.toLowerCase() === "bnb") {
         if (bestPair.priceNative) {
-          console.log(`Giá của token ${symbol} theo BNB (DexScreener): ${bestPair.priceNative} BNB`);
+          console.log(`Giá của token ${symbol} theo BNB (DexScreener): ${bestPair.priceNative} ${bestPair.quoteToken.symbol}(${bestPair.quoteToken.name})`);
           console.log(`Sàn: ${bestPair.dexId}, Liquidity: $${bestPair.liquidity?.usd || 'N/A'}`);
           return bestPair.priceNative;
         }
@@ -177,41 +313,6 @@ async function checkPathLiquidityV2(path, decimals) {
   } catch (error) {
     return false;
   }
-}
-
-/**
- * Thử lấy giá token trên PancakeSwap V3
- * @param {string} tokenIn - Địa chỉ token input
- * @param {string} tokenOut - Địa chỉ token output
- * @param {number} decimalsIn - Số decimal của token input
- * @returns {Promise<string|null>} - Giá token hoặc null nếu không thành công
- */
-async function tryGetPriceV3(tokenIn, tokenOut, decimalsIn) {
-  // Các fee tiers của PancakeSwap V3 (0.01%, 0.05%, 0.25%, 1%)
-  const feeTiers = [100, 500, 2500, 10000];
-  
-  for (const fee of feeTiers) {
-    try {
-      const amountIn = ethers.parseUnits("1", decimalsIn);
-      const sqrtPriceLimitX96 = 0;
-      
-      const amountOut = await quoterContract.quoteExactInputSingle(
-        tokenIn,
-        tokenOut,
-        fee,
-        amountIn,
-        sqrtPriceLimitX96
-      );
-      
-      return ethers.formatUnits(amountOut, 18);
-    } catch (error) {
-      console.error("Lỗi khi lấy giá từ PancakeSwap V3:", error.message);
-      // Thử fee tier tiếp theo
-      continue;
-    }
-  }
-  
-  return null;
 }
 
 /**
@@ -325,13 +426,13 @@ async function getTokenPrice(tokenAddress, mode = "bnb", tryV3 = true) {
         
         if (mode.toLowerCase() === "usdt") {
           // Thử lấy giá trực tiếp với USDT
-          priceV3 = await tryGetPriceV3(formattedTokenAddress, USDT, decimals);
+          priceV3 = await tryGetPriceV3(formattedTokenAddress, USDT);
           
           // Nếu không có cặp trực tiếp, thử qua WBNB
           if (!priceV3) {
-            const priceInBNB = await tryGetPriceV3(formattedTokenAddress, WBNB, decimals);
+            const priceInBNB = await tryGetPriceV3(formattedTokenAddress, WBNB);
             if (priceInBNB) {
-              const bnbPriceInUSDT = await tryGetPriceV3(WBNB, USDT, 18);
+              const bnbPriceInUSDT = await tryGetPriceV3(WBNB, USDT);
               if (bnbPriceInUSDT) {
                 priceV3 = (parseFloat(priceInBNB) * parseFloat(bnbPriceInUSDT)).toString();
                 console.log(`Path đã dùng (V3): ${symbol} → WBNB → USDT`);
@@ -342,7 +443,7 @@ async function getTokenPrice(tokenAddress, mode = "bnb", tryV3 = true) {
           }
         } else {
           // Lấy giá theo BNB
-          priceV3 = await tryGetPriceV3(formattedTokenAddress, WBNB, decimals);
+          priceV3 = await tryGetPriceV3(formattedTokenAddress, WBNB);
           if (priceV3) {
             console.log(`Path đã dùng (V3): ${symbol} → WBNB`);
           }
@@ -385,7 +486,7 @@ async function getTokenPrice(tokenAddress, mode = "bnb", tryV3 = true) {
 
 // Thử nghiệm với các tokens
 const CAKE = "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82";
-const UGO = "0x66a2ed2F04BC7D2a03785DD04261A2FA595a5839";
+// const UGO = "0x66a2ed2F04BC7D2a03785DD04261A2FA595a5839";
 
 // Thực hiện kiểm tra giá theo cả hai chế độ
 async function checkPrices(tokenAddress) {
